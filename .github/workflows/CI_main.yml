@@ -1,22 +1,23 @@
-name: PKI CI Pipeline
-
-on:
-  push:
-  workflow_dispatch:
-
+name: Security Scan CI
+on: [push, workflow_dispatch]
 jobs:
-  test:
-    runs-on: ubuntu-latest
+ci-pipeline:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout code
+uses: actions/checkout@v4
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Run PKI tool test
-        run: |
-          python test_pki_tool.py
+- name: Set up Python
+uses: actions/setup-python@v5
+with:
+python-version: ’3.10’
+- name: Install tools
+run: |
+pip install pylint pytest bandit
+- name: Run pylint (code quality)
+run: pylint app.py --exit-zero
+- name: Run Bandit (SAST - Security Scan
+)
+run: bandit -r . --exit-zero
+- name: Run pytest (functional test)
+run: pytest
