@@ -1,12 +1,17 @@
-name: Security Scan CI
-on: [push, workflow_dispatch]
+name: Security Scan + Release CI
+on:
+push:
+branches: [main]
+workflow_dispatch:
 jobs:
 ci-pipeline:
 runs-on: ubuntu-latest
+permissions:
+contents: read
+packages: write
 steps:
 - name: Checkout code
 uses: actions/checkout@v4
-
 - name: Set up Python
 uses: actions/setup-python@v5
 with:
@@ -21,3 +26,18 @@ run: pylint app.py --exit-zero
 run: bandit -r . --exit-zero
 - name: Run pytest (functional test)
 run: pytest
+- name: Log in to GHCR
+uses: docker/login-action@v3
+with:
+registry: ghcr.io
+
+username: ${{ github.actor }}
+password: ${{ secrets.GITHUB_TOKEN
+}}
+- name: Build and push Docker image
+uses: docker/build-push-action@v5
+with:
+context: .
+push: true
+tags: ghcr.io/${{ github.repository
+}}/pki-app:latest
