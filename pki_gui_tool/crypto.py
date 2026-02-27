@@ -148,9 +148,12 @@ def sign_file(path: Path, private_key, signer_cert: Optional[x509.Certificate], 
 
 def verify_file(path: Path, signature_blob: Dict[str, str], public_key, store: DataStore) -> SignatureResult:
     meta = signature_blob.get("meta", {})
-    sig = b64d(signature_blob.get("signature", ""))
     if not meta:
         return SignatureResult(False, "Missing metadata")
+    try:
+        sig = b64d(signature_blob.get("signature", ""))
+    except Exception:
+        return SignatureResult(False, "Invalid signature encoding")
     data_to_verify = json.dumps(meta, sort_keys=True).encode("utf-8")
     if store.has_nonce(meta.get("nonce", "")):
         return SignatureResult(False, "Replay detected (nonce already seen)")

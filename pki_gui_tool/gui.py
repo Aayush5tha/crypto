@@ -11,9 +11,8 @@ from cryptography.hazmat.primitives import serialization
 
 from . import crypto
 from .attacks import simulate_mitm, simulate_replay
-from .models import CertInfo
 from .storage import DataStore, KeyStore, load_cert_pem, load_private_key, load_public_key, save_cert_pem, save_private_key_pem, save_public_key_pem
-from .utils import b64d, b64e, cert_fingerprint_sha256, read_json, safe_write_bytes, safe_write_text, write_json
+from .utils import cert_fingerprint_sha256, read_json, safe_write_bytes, write_json
 
 
 APP_TITLE = "PKI Forge - Cryptographic Tool"
@@ -155,9 +154,13 @@ class App:
         ttk.Entry(section, textvariable=self.output_var, width=60).grid(row=5, column=1, sticky="we", pady=(8, 0))
         ttk.Button(section, text="Browse", command=self._choose_output_dir, style="Secondary.TButton").grid(row=5, column=2, padx=8, pady=(8, 0))
 
-        ttk.Button(section, text="Generate Key Pair", command=self._generate_keypair, style="Primary.TButton").grid(row=6, column=0, pady=12, sticky="w")
-        ttk.Button(section, text="Create Self-Signed Cert", command=self._create_self_signed, style="Secondary.TButton").grid(row=6, column=1, pady=12, sticky="w")
-        ttk.Button(section, text="Create CSR", command=self._create_csr, style="Secondary.TButton").grid(row=6, column=2, pady=12, sticky="w")
+        ttk.Label(section, text="Private Key Password (optional)").grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self.key_pwd_var = tk.StringVar()
+        ttk.Entry(section, textvariable=self.key_pwd_var, width=24, show="*").grid(row=6, column=1, sticky="w", pady=(8, 0))
+
+        ttk.Button(section, text="Generate Key Pair", command=self._generate_keypair, style="Primary.TButton").grid(row=7, column=0, pady=12, sticky="w")
+        ttk.Button(section, text="Create Self-Signed Cert", command=self._create_self_signed, style="Secondary.TButton").grid(row=7, column=1, pady=12, sticky="w")
+        ttk.Button(section, text="Create CSR", command=self._create_csr, style="Secondary.TButton").grid(row=7, column=2, pady=12, sticky="w")
 
         csr_section = self._section(frame, "CSR Signing (CA)")
         csr_section.grid(row=2, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -217,12 +220,17 @@ class App:
         ttk.Entry(verify_section, textvariable=self.sig_in_var, width=60).grid(row=0, column=1, sticky="we", pady=(4, 0))
         ttk.Button(verify_section, text="Browse", command=self._choose_sig_in, style="Secondary.TButton").grid(row=0, column=2, padx=8, pady=(4, 0))
 
-        ttk.Label(verify_section, text="Public Key / Cert").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.verify_key_var = tk.StringVar()
-        ttk.Entry(verify_section, textvariable=self.verify_key_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(verify_section, text="Browse", command=self._choose_verify_key, style="Secondary.TButton").grid(row=1, column=2, padx=8)
+        ttk.Label(verify_section, text="File to Verify").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.verify_file_var = tk.StringVar()
+        ttk.Entry(verify_section, textvariable=self.verify_file_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
+        ttk.Button(verify_section, text="Browse", command=self._choose_verify_file, style="Secondary.TButton").grid(row=1, column=2, padx=8)
 
-        ttk.Button(verify_section, text="Verify", command=self._verify_file, style="Primary.TButton").grid(row=2, column=0, pady=12, sticky="w")
+        ttk.Label(verify_section, text="Public Key / Cert").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.verify_key_var = tk.StringVar()
+        ttk.Entry(verify_section, textvariable=self.verify_key_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
+        ttk.Button(verify_section, text="Browse", command=self._choose_verify_key, style="Secondary.TButton").grid(row=2, column=2, padx=8)
+
+        ttk.Button(verify_section, text="Verify", command=self._verify_file, style="Primary.TButton").grid(row=3, column=0, pady=12, sticky="w")
     def _build_encrypt_tab(self):
         frame = self._tab_encrypt
         frame.configure(padding=16)
@@ -368,6 +376,14 @@ class App:
         self.log_text.insert(tk.END, msg + "\n")
         self.log_text.see(tk.END)
         self.status_var.set(msg)
+
+    def _private_key_password(self):
+        pwd = self.key_pwd_var.get()
+        return pwd if pwd else None
+
+    def _load_private_key_from_path(self, path: Path):
+        return load_private_key(path, self._private_key_password())
+
     def _choose_output_dir(self):
         path = filedialog.askdirectory()
         if path:
@@ -397,6 +413,11 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
         if path:
             self.sig_in_var.set(path)
+
+    def _choose_verify_file(self):
+        path = filedialog.askopenfilename()
+        if path:
+            self.verify_file_var.set(path)
 
     def _choose_verify_key(self):
         path = filedialog.askopenfilename()
@@ -473,7 +494,7 @@ class App:
         curve = self.curve_var.get()
         priv, pub = crypto.generate_keypair(alg, key_size, curve)
         out_dir = Path(self.output_var.get())
-        save_private_key_pem(out_dir / "private_key.pem", priv, None)
+        save_private_key_pem(out_dir / "private_key.pem", priv, self._private_key_password())
         save_public_key_pem(out_dir / "public_key.pem", pub)
         self._log(f"Generated {alg} key pair at {out_dir}")
 
@@ -486,7 +507,7 @@ class App:
         priv, _ = crypto.generate_keypair(alg, key_size, curve)
         cert = crypto.create_self_signed_cert(priv, subject_cn, days)
         out_dir = Path(self.output_var.get())
-        save_private_key_pem(out_dir / "private_key.pem", priv, None)
+        save_private_key_pem(out_dir / "private_key.pem", priv, self._private_key_password())
         save_cert_pem(out_dir / "certificate.pem", cert)
         self._log(f"Created self-signed cert for {subject_cn}")
 
@@ -498,7 +519,7 @@ class App:
         priv, _ = crypto.generate_keypair(alg, key_size, curve)
         csr = crypto.create_csr(priv, subject_cn)
         out_dir = Path(self.output_var.get())
-        save_private_key_pem(out_dir / "csr_private_key.pem", priv, None)
+        save_private_key_pem(out_dir / "csr_private_key.pem", priv, self._private_key_password())
         safe_write_bytes(out_dir / "request.csr", csr.public_bytes(serialization.Encoding.PEM))
         self._log(f"CSR created for {subject_cn}")
 
@@ -508,7 +529,7 @@ class App:
         csr_path = filedialog.askopenfilename(title="Select CSR")
         if not (ca_key_path and ca_cert_path and csr_path):
             return
-        ca_key = load_private_key(Path(ca_key_path), None)
+        ca_key = self._load_private_key_from_path(Path(ca_key_path))
         ca_cert = load_cert_pem(Path(ca_cert_path))
         csr = x509.load_pem_x509_csr(Path(csr_path).read_bytes())
         days = int(self.days_var.get())
@@ -525,19 +546,23 @@ class App:
         key_path = Path(self.sign_key_var.get())
         cert_path = self.sign_cert_var.get()
         signer_cert = load_cert_pem(Path(cert_path)) if cert_path else None
-        private_key = load_private_key(key_path, None)
+        private_key = self._load_private_key_from_path(key_path)
         blob = crypto.sign_file(file_path, private_key, signer_cert, self.data_store)
         out_path = Path(self.sig_out_var.get())
         write_json(out_path, blob)
         self._log(f"Signed file {file_path.name} -> {out_path}")
 
     def _verify_file(self):
-        if not self.sign_file_var.get() or not self.sig_in_var.get() or not self.verify_key_var.get():
+        if not self.verify_file_var.get() or not self.sig_in_var.get() or not self.verify_key_var.get():
             messagebox.showwarning("Missing", "Select file, signature, and public key/cert")
             return
-        file_path = Path(self.sign_file_var.get())
+        file_path = Path(self.verify_file_var.get())
         sig_path = Path(self.sig_in_var.get())
-        sig_blob = read_json(sig_path)
+        try:
+            sig_blob = read_json(sig_path)
+        except Exception as exc:
+            messagebox.showerror("Invalid signature file", f"Could not parse JSON: {exc}")
+            return
         key_path = Path(self.verify_key_var.get())
         if key_path.suffix.lower() in {".pem", ".crt", ".cer"}:
             try:
@@ -551,7 +576,12 @@ class App:
                 public_key = load_public_key(key_path)
         else:
             public_key = load_public_key(key_path)
-        result = crypto.verify_file(file_path, sig_blob, public_key, self.data_store)
+        try:
+            result = crypto.verify_file(file_path, sig_blob, public_key, self.data_store)
+        except Exception as exc:
+            self._log(f"Verify failed: {exc}")
+            messagebox.showerror("Verify failed", str(exc))
+            return
         self._log(f"Verify: {result.reason}")
         if result.ok:
             messagebox.showinfo("Verified", result.reason)
@@ -578,9 +608,13 @@ class App:
         if not self.dec_in_var.get() or not self.dec_key_var.get():
             messagebox.showwarning("Missing", "Select encrypted file and private key")
             return
-        blob = read_json(Path(self.dec_in_var.get()))
+        try:
+            blob = read_json(Path(self.dec_in_var.get()))
+        except Exception as exc:
+            messagebox.showerror("Invalid encrypted file", f"Could not parse JSON: {exc}")
+            return
         key_path = Path(self.dec_key_var.get())
-        private_key = load_private_key(key_path, None)
+        private_key = self._load_private_key_from_path(key_path)
         out_path = Path(self.dec_out_var.get())
         result = crypto.decrypt_file(blob, private_key, out_path)
         self._log(result.reason)
@@ -593,7 +627,7 @@ class App:
         if not (self.ks_key_var.get() and self.ks_cert_var.get() and self.ks_pwd_var.get()):
             messagebox.showwarning("Missing", "Provide key, cert, and password")
             return
-        key = load_private_key(Path(self.ks_key_var.get()), None)
+        key = self._load_private_key_from_path(Path(self.ks_key_var.get()))
         cert = load_cert_pem(Path(self.ks_cert_var.get()))
         ks = KeyStore(Path(self.ks_out_var.get()))
         ks.save_pkcs12(key, cert, self.ks_pwd_var.get(), "pki-gui")
@@ -605,6 +639,10 @@ class App:
             return
         ks = KeyStore(Path(self.ks_in_var.get()))
         key, cert = ks.load_pkcs12(self.ks_in_pwd_var.get())
+        if cert is None:
+            self._log("Loaded keystore but no certificate found")
+            messagebox.showwarning("Keystore", "Keystore loaded but no certificate was found")
+            return
         self._log(f"Loaded keystore. Cert fingerprint: {cert_fingerprint_sha256(cert)}")
 
     def _simulate_mitm(self):

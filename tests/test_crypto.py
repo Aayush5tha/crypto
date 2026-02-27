@@ -43,3 +43,17 @@ def test_encrypt_decrypt_ecc():
         result = crypto.decrypt_file(blob, priv, out_path)
         assert result.ok
         assert out_path.read_text() == "secret"
+
+
+def test_verify_handles_invalid_base64_signature():
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        store = DataStore(base)
+        priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
+        data_path = base / "data.txt"
+        data_path.write_text("hello")
+        blob = crypto.sign_file(data_path, priv, None, store)
+        blob["signature"] = "not-base64-@@@"
+        result = crypto.verify_file(data_path, blob, pub, store)
+        assert not result.ok
+        assert "Invalid signature encoding" in result.reason
