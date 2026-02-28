@@ -146,7 +146,13 @@ def sign_file(path: Path, private_key, signer_cert: Optional[x509.Certificate], 
     return out
 
 
-def verify_file(path: Path, signature_blob: Dict[str, str], public_key, store: DataStore) -> SignatureResult:
+def verify_file(
+    path: Path,
+    signature_blob: Dict[str, str],
+    public_key,
+    store: DataStore,
+    enforce_replay: bool = False,
+) -> SignatureResult:
     meta = signature_blob.get("meta", {})
     if not meta:
         return SignatureResult(False, "Missing metadata")
@@ -155,15 +161,20 @@ def verify_file(path: Path, signature_blob: Dict[str, str], public_key, store: D
     except Exception:
         return SignatureResult(False, "Invalid signature encoding")
     data_to_verify = json.dumps(meta, sort_keys=True).encode("utf-8")
-    if store.has_nonce(meta.get("nonce", "")):
-        return SignatureResult(False, "Replay detected (nonce already seen)")
+    nonce = meta.get("nonce", "")
+    if enforce_replay:
+        if not nonce:
+            return SignatureResult(False, "Missing nonce")
+        if store.has_nonce(nonce):
+            return SignatureResult(False, "Replay detected (nonce already seen)")
     ok = verify_bytes(public_key, data_to_verify, sig)
     if not ok:
         return SignatureResult(False, "Signature mismatch")
     actual = sha256_hex(path.read_bytes())
     if actual != meta.get("sha256", ""):
         return SignatureResult(False, "File hash mismatch")
-    store.record_nonce(meta.get("nonce", ""))
+    if enforce_replay:
+        store.record_nonce(nonce)
     return SignatureResult(True, "Signature valid", signature_blob.get("signer_fingerprint"))
 
 
@@ -257,9 +268,10 @@ def decrypt_file(blob: Dict[str, str], recipient_private_key, output_path: Path)
             plaintext = hybrid_decrypt_ecc(blob, recipient_private_key)
         else:
             return DecryptResult(False, "Unsupported encryption algorithm")
-        output_path.write_bytes(plaintext)
         if sha256_hex(plaintext) != blob.get("sha256", ""):
             return DecryptResult(False, "Integrity check failed")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(plaintext)
         return DecryptResult(True, "Decrypted OK", str(output_path))
     except Exception as exc:
         return DecryptResult(False, f"Decrypt failed: {exc}")

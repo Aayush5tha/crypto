@@ -120,8 +120,41 @@ class App:
         frame.configure(style="TLabelframe")
         return frame
     def _build_keys_tab(self):
-        frame = self._tab_keys
-        frame.configure(padding=16)
+        tab = self._tab_keys
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+
+        container = ttk.Frame(tab)
+        container.grid(row=0, column=0, sticky="nsew")
+        canvas = tk.Canvas(container, background=COLOR_BG, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        frame = ttk.Frame(canvas, padding=16)
+        frame_window = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def _on_frame_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfigure(frame_window, width=event.width)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(_event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(_event):
+            canvas.unbind_all("<MouseWheel>")
+
+        frame.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="Key and Certificate Management", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
 
@@ -529,28 +562,36 @@ class App:
         csr_path = filedialog.askopenfilename(title="Select CSR")
         if not (ca_key_path and ca_cert_path and csr_path):
             return
-        ca_key = self._load_private_key_from_path(Path(ca_key_path))
-        ca_cert = load_cert_pem(Path(ca_cert_path))
-        csr = x509.load_pem_x509_csr(Path(csr_path).read_bytes())
-        days = int(self.days_var.get())
-        cert = crypto.sign_csr(ca_key, ca_cert, csr, days)
-        out_dir = Path(self.output_var.get())
-        save_cert_pem(out_dir / "signed_certificate.pem", cert)
-        self._log("CSR signed by CA")
+        try:
+            ca_key = self._load_private_key_from_path(Path(ca_key_path))
+            ca_cert = load_cert_pem(Path(ca_cert_path))
+            csr = x509.load_pem_x509_csr(Path(csr_path).read_bytes())
+            days = int(self.days_var.get())
+            cert = crypto.sign_csr(ca_key, ca_cert, csr, days)
+            out_dir = Path(self.output_var.get())
+            save_cert_pem(out_dir / "signed_certificate.pem", cert)
+            self._log("CSR signed by CA")
+        except Exception as exc:
+            self._log(f"CSR signing failed: {exc}")
+            messagebox.showerror("CSR signing failed", str(exc))
 
     def _sign_file(self):
         if not self.sign_file_var.get() or not self.sign_key_var.get():
             messagebox.showwarning("Missing", "Please select file and private key")
             return
-        file_path = Path(self.sign_file_var.get())
-        key_path = Path(self.sign_key_var.get())
-        cert_path = self.sign_cert_var.get()
-        signer_cert = load_cert_pem(Path(cert_path)) if cert_path else None
-        private_key = self._load_private_key_from_path(key_path)
-        blob = crypto.sign_file(file_path, private_key, signer_cert, self.data_store)
-        out_path = Path(self.sig_out_var.get())
-        write_json(out_path, blob)
-        self._log(f"Signed file {file_path.name} -> {out_path}")
+        try:
+            file_path = Path(self.sign_file_var.get())
+            key_path = Path(self.sign_key_var.get())
+            cert_path = self.sign_cert_var.get()
+            signer_cert = load_cert_pem(Path(cert_path)) if cert_path else None
+            private_key = self._load_private_key_from_path(key_path)
+            blob = crypto.sign_file(file_path, private_key, signer_cert, self.data_store)
+            out_path = Path(self.sig_out_var.get())
+            write_json(out_path, blob)
+            self._log(f"Signed file {file_path.name} -> {out_path}")
+        except Exception as exc:
+            self._log(f"Sign failed: {exc}")
+            messagebox.showerror("Sign failed", str(exc))
 
     def _verify_file(self):
         if not self.verify_file_var.get() or not self.sig_in_var.get() or not self.verify_key_var.get():
@@ -563,20 +604,20 @@ class App:
         except Exception as exc:
             messagebox.showerror("Invalid signature file", f"Could not parse JSON: {exc}")
             return
-        key_path = Path(self.verify_key_var.get())
-        if key_path.suffix.lower() in {".pem", ".crt", ".cer"}:
-            try:
-                cert = load_cert_pem(key_path)
-                public_key = cert.public_key()
-                if self.data_store.is_revoked(cert_fingerprint_sha256(cert)):
-                    self._log("Verification failed: certificate revoked")
-                    messagebox.showerror("Revoked", "Certificate revoked")
-                    return
-            except Exception:
-                public_key = load_public_key(key_path)
-        else:
-            public_key = load_public_key(key_path)
         try:
+            key_path = Path(self.verify_key_var.get())
+            if key_path.suffix.lower() in {".pem", ".crt", ".cer"}:
+                try:
+                    cert = load_cert_pem(key_path)
+                    public_key = cert.public_key()
+                    if self.data_store.is_revoked(cert_fingerprint_sha256(cert)):
+                        self._log("Verification failed: certificate revoked")
+                        messagebox.showerror("Revoked", "Certificate revoked")
+                        return
+                except Exception:
+                    public_key = load_public_key(key_path)
+            else:
+                public_key = load_public_key(key_path)
             result = crypto.verify_file(file_path, sig_blob, public_key, self.data_store)
         except Exception as exc:
             self._log(f"Verify failed: {exc}")
@@ -592,17 +633,21 @@ class App:
         if not self.enc_file_var.get() or not self.enc_pub_var.get():
             messagebox.showwarning("Missing", "Select file and recipient public key/cert")
             return
-        file_path = Path(self.enc_file_var.get())
-        pub_path = Path(self.enc_pub_var.get())
         try:
-            cert = load_cert_pem(pub_path)
-            public_key = cert.public_key()
-        except Exception:
-            public_key = load_public_key(pub_path)
-        blob = crypto.encrypt_file(file_path, public_key)
-        out_path = Path(self.enc_out_var.get())
-        write_json(out_path, blob)
-        self._log(f"Encrypted {file_path.name} -> {out_path}")
+            file_path = Path(self.enc_file_var.get())
+            pub_path = Path(self.enc_pub_var.get())
+            try:
+                cert = load_cert_pem(pub_path)
+                public_key = cert.public_key()
+            except Exception:
+                public_key = load_public_key(pub_path)
+            blob = crypto.encrypt_file(file_path, public_key)
+            out_path = Path(self.enc_out_var.get())
+            write_json(out_path, blob)
+            self._log(f"Encrypted {file_path.name} -> {out_path}")
+        except Exception as exc:
+            self._log(f"Encrypt failed: {exc}")
+            messagebox.showerror("Encrypt failed", str(exc))
 
     def _decrypt_file(self):
         if not self.dec_in_var.get() or not self.dec_key_var.get():
@@ -613,50 +658,66 @@ class App:
         except Exception as exc:
             messagebox.showerror("Invalid encrypted file", f"Could not parse JSON: {exc}")
             return
-        key_path = Path(self.dec_key_var.get())
-        private_key = self._load_private_key_from_path(key_path)
-        out_path = Path(self.dec_out_var.get())
-        result = crypto.decrypt_file(blob, private_key, out_path)
-        self._log(result.reason)
-        if result.ok:
-            messagebox.showinfo("Decrypted", result.reason)
-        else:
-            messagebox.showerror("Decrypt failed", result.reason)
+        try:
+            key_path = Path(self.dec_key_var.get())
+            private_key = self._load_private_key_from_path(key_path)
+            out_path = Path(self.dec_out_var.get())
+            result = crypto.decrypt_file(blob, private_key, out_path)
+            self._log(result.reason)
+            if result.ok:
+                messagebox.showinfo("Decrypted", result.reason)
+            else:
+                messagebox.showerror("Decrypt failed", result.reason)
+        except Exception as exc:
+            self._log(f"Decrypt failed: {exc}")
+            messagebox.showerror("Decrypt failed", str(exc))
 
     def _create_keystore(self):
         if not (self.ks_key_var.get() and self.ks_cert_var.get() and self.ks_pwd_var.get()):
             messagebox.showwarning("Missing", "Provide key, cert, and password")
             return
-        key = self._load_private_key_from_path(Path(self.ks_key_var.get()))
-        cert = load_cert_pem(Path(self.ks_cert_var.get()))
-        ks = KeyStore(Path(self.ks_out_var.get()))
-        ks.save_pkcs12(key, cert, self.ks_pwd_var.get(), "pki-gui")
-        self._log(f"Keystore created at {self.ks_out_var.get()}")
+        try:
+            key = self._load_private_key_from_path(Path(self.ks_key_var.get()))
+            cert = load_cert_pem(Path(self.ks_cert_var.get()))
+            ks = KeyStore(Path(self.ks_out_var.get()))
+            ks.save_pkcs12(key, cert, self.ks_pwd_var.get(), "pki-gui")
+            self._log(f"Keystore created at {self.ks_out_var.get()}")
+        except Exception as exc:
+            self._log(f"Keystore creation failed: {exc}")
+            messagebox.showerror("Keystore creation failed", str(exc))
 
     def _load_keystore(self):
         if not (self.ks_in_var.get() and self.ks_in_pwd_var.get()):
             messagebox.showwarning("Missing", "Provide keystore and password")
             return
-        ks = KeyStore(Path(self.ks_in_var.get()))
-        key, cert = ks.load_pkcs12(self.ks_in_pwd_var.get())
-        if cert is None:
-            self._log("Loaded keystore but no certificate found")
-            messagebox.showwarning("Keystore", "Keystore loaded but no certificate was found")
-            return
-        self._log(f"Loaded keystore. Cert fingerprint: {cert_fingerprint_sha256(cert)}")
+        try:
+            ks = KeyStore(Path(self.ks_in_var.get()))
+            key, cert = ks.load_pkcs12(self.ks_in_pwd_var.get())
+            if cert is None:
+                self._log("Loaded keystore but no certificate found")
+                messagebox.showwarning("Keystore", "Keystore loaded but no certificate was found")
+                return
+            self._log(f"Loaded keystore. Cert fingerprint: {cert_fingerprint_sha256(cert)}")
+        except Exception as exc:
+            self._log(f"Keystore load failed: {exc}")
+            messagebox.showerror("Keystore load failed", str(exc))
 
     def _simulate_mitm(self):
         if not (self.mitm_expected_var.get() and self.mitm_presented_var.get()):
             messagebox.showwarning("Missing", "Provide both certs")
             return
-        expected = load_cert_pem(Path(self.mitm_expected_var.get()))
-        presented = load_cert_pem(Path(self.mitm_presented_var.get()))
-        result = simulate_mitm(expected, presented)
-        self._log(result["result"])
-        if result["ok"] == "true":
-            messagebox.showinfo("MITM", result["result"])
-        else:
-            messagebox.showwarning("MITM", result["result"])
+        try:
+            expected = load_cert_pem(Path(self.mitm_expected_var.get()))
+            presented = load_cert_pem(Path(self.mitm_presented_var.get()))
+            result = simulate_mitm(expected, presented)
+            self._log(result["result"])
+            if result["ok"] == "true":
+                messagebox.showinfo("MITM", result["result"])
+            else:
+                messagebox.showwarning("MITM", result["result"])
+        except Exception as exc:
+            self._log(f"MITM simulation failed: {exc}")
+            messagebox.showerror("MITM simulation failed", str(exc))
 
     def _simulate_replay(self):
         nonce = self.replay_nonce_var.get().strip()
@@ -674,12 +735,16 @@ class App:
         if not self.revoke_cert_var.get():
             messagebox.showwarning("Missing", "Select a certificate to revoke")
             return
-        cert = load_cert_pem(Path(self.revoke_cert_var.get()))
-        fp = cert_fingerprint_sha256(cert)
-        reason = self.revoke_reason_var.get().strip() or "Unspecified"
-        self.data_store.add_revoked(fp, reason)
-        self._log(f"Revoked cert fingerprint {fp} ({reason})")
-        messagebox.showinfo("Revoked", "Certificate revoked and added to CRL")
+        try:
+            cert = load_cert_pem(Path(self.revoke_cert_var.get()))
+            fp = cert_fingerprint_sha256(cert)
+            reason = self.revoke_reason_var.get().strip() or "Unspecified"
+            self.data_store.add_revoked(fp, reason)
+            self._log(f"Revoked cert fingerprint {fp} ({reason})")
+            messagebox.showinfo("Revoked", "Certificate revoked and added to CRL")
+        except Exception as exc:
+            self._log(f"CRL update failed: {exc}")
+            messagebox.showerror("CRL update failed", str(exc))
 
 
 def run_app():

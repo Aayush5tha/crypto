@@ -19,6 +19,20 @@ def test_sign_verify_roundtrip():
         assert result.ok
 
 
+def test_verify_same_signature_multiple_times_when_replay_not_enforced():
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        store = DataStore(base)
+        priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
+        data_path = base / "data.txt"
+        data_path.write_text("hello")
+        blob = crypto.sign_file(data_path, priv, None, store)
+        first = crypto.verify_file(data_path, blob, pub, store)
+        second = crypto.verify_file(data_path, blob, pub, store)
+        assert first.ok
+        assert second.ok
+
+
 def test_encrypt_decrypt_rsa():
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -30,6 +44,20 @@ def test_encrypt_decrypt_rsa():
         result = crypto.decrypt_file(blob, priv, out_path)
         assert result.ok
         assert out_path.read_text() == "secret"
+
+
+def test_decrypt_does_not_write_output_on_integrity_failure():
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
+        data_path = base / "msg.txt"
+        data_path.write_text("secret")
+        blob = crypto.encrypt_file(data_path, pub)
+        blob["sha256"] = "00" * 32
+        out_path = base / "out.txt"
+        result = crypto.decrypt_file(blob, priv, out_path)
+        assert not result.ok
+        assert not out_path.exists()
 
 
 def test_encrypt_decrypt_ecc():
