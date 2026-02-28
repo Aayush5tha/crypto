@@ -17,14 +17,16 @@ from .utils import cert_fingerprint_sha256, read_json, safe_write_bytes, write_j
 
 APP_TITLE = "PKI Forge - Cryptographic Tool"
 
-# Light theme palette
-COLOR_BG = "#f7f9fc"
-COLOR_SURFACE = "#ffffff"
-COLOR_BORDER = "#e4e9f2"
-COLOR_TEXT = "#0f172a"
-COLOR_MUTED = "#4b5563"
-COLOR_ACCENT = "#2563eb"
-COLOR_ACCENT_2 = "#0ea5e9"
+# Dashboard-style dark palette
+COLOR_BG = "#111c46"
+COLOR_SURFACE = "#1a2a5b"
+COLOR_PANEL = "#223468"
+COLOR_BORDER = "#3b4e85"
+COLOR_TEXT = "#e8eefc"
+COLOR_MUTED = "#a6b4d9"
+COLOR_ACCENT = "#5ed8ff"
+COLOR_ACCENT_2 = "#38bdf8"
+COLOR_ACCENT_SOFT = "#2a476f"
 
 FONT_BASE = ("Segoe UI", 10)
 FONT_HEADER = ("Segoe UI Semibold", 15)
@@ -54,27 +56,59 @@ class App:
         style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=FONT_BASE)
         style.configure("Header.TLabel", font=FONT_HEADER, foreground=COLOR_TEXT)
         style.configure("Subheader.TLabel", font=FONT_SUBHEADER, foreground=COLOR_MUTED)
-        style.configure("TButton", font=FONT_BASE, padding=(12, 7), background=COLOR_SURFACE)
+        style.configure(
+            "TButton",
+            font=FONT_BASE,
+            padding=(12, 7),
+            background=COLOR_PANEL,
+            foreground=COLOR_TEXT,
+            bordercolor=COLOR_BORDER,
+            lightcolor=COLOR_BORDER,
+            darkcolor=COLOR_BORDER,
+        )
         style.map(
             "TButton",
-            background=[("active", "#eef2f7")],
+            background=[("active", COLOR_ACCENT_SOFT)],
             foreground=[("active", COLOR_TEXT)],
         )
-        style.configure("Primary.TButton", background=COLOR_ACCENT, foreground="#ffffff")
+        style.configure(
+            "Primary.TButton",
+            background=COLOR_ACCENT,
+            foreground="#06243a",
+            bordercolor=COLOR_ACCENT,
+            lightcolor=COLOR_ACCENT,
+            darkcolor=COLOR_ACCENT,
+        )
         style.map(
             "Primary.TButton",
             background=[("active", COLOR_ACCENT_2)],
-            foreground=[("active", "#ffffff")],
+            foreground=[("active", "#06243a")],
         )
-        style.configure("Secondary.TButton", background="#f3f4f6", foreground=COLOR_TEXT)
-        style.map("Secondary.TButton", background=[("active", "#e5e7eb")])
-        style.configure("TEntry", fieldbackground=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER)
-        style.configure("TCombobox", fieldbackground=COLOR_SURFACE, foreground=COLOR_TEXT)
+        style.configure("Secondary.TButton", background=COLOR_PANEL, foreground=COLOR_TEXT)
+        style.map("Secondary.TButton", background=[("active", COLOR_ACCENT_SOFT)])
+        style.configure(
+            "TEntry",
+            fieldbackground=COLOR_PANEL,
+            foreground=COLOR_TEXT,
+            bordercolor=COLOR_BORDER,
+            insertcolor=COLOR_TEXT,
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=COLOR_PANEL,
+            foreground=COLOR_TEXT,
+            bordercolor=COLOR_BORDER,
+            arrowcolor=COLOR_MUTED,
+        )
         style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background="#eef2f7", foreground=COLOR_MUTED, padding=(16, 10))
-        style.map("TNotebook.Tab", background=[("selected", COLOR_SURFACE)], foreground=[("selected", COLOR_TEXT)])
-        style.configure("TLabelframe", background=COLOR_BG, foreground=COLOR_TEXT)
-        style.configure("TLabelframe.Label", background=COLOR_BG, foreground=COLOR_TEXT, font=FONT_SUBHEADER)
+        style.configure("TNotebook.Tab", background=COLOR_PANEL, foreground=COLOR_MUTED, padding=(16, 10))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", COLOR_SURFACE)],
+            foreground=[("selected", COLOR_ACCENT)],
+        )
+        style.configure("TLabelframe", background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER)
+        style.configure("TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=FONT_SUBHEADER)
 
     def _build_ui(self):
         header = ttk.Frame(self.root)
@@ -392,7 +426,7 @@ class App:
         ttk.Label(frame, text="Activity Log", style="Header.TLabel").grid(row=0, column=0, sticky="w", pady=(4, 12))
         self.log_text = tk.Text(
             frame,
-            bg=COLOR_SURFACE,
+            bg=COLOR_PANEL,
             fg=COLOR_TEXT,
             insertbackground=COLOR_TEXT,
             height=24,
