@@ -1,17 +1,29 @@
 ﻿
 from __future__ import annotations
 
-import json
 from pathlib import Path
+import subprocess
+import sys
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
+from .api_client import APIClient, APIClientError
 from . import crypto
 from .attacks import simulate_mitm, simulate_replay
-from .storage import DataStore, KeyStore, load_cert_pem, load_private_key, load_public_key, save_cert_pem, save_private_key_pem, save_public_key_pem
+from .storage import (
+    DataStore,
+    KeyStore,
+    load_cert_pem,
+    load_private_key,
+    load_public_key,
+    save_cert_pem,
+    save_private_key_pem,
+    save_public_key_pem,
+)
 from .utils import cert_fingerprint_sha256, read_json, safe_write_bytes, write_json
 
 
@@ -41,13 +53,20 @@ class App:
         self.root.geometry("1120x720")
         self.root.minsize(980, 640)
         self.root.configure(bg=COLOR_BG)
+
         self.base_dir = Path(__file__).resolve().parents[1]
         self.data_dir = self.base_dir / "data"
         self.output_dir = self.data_dir / "output"
         self.data_store = DataStore(self.data_dir)
+        self.api_client = APIClient()
+        self.server_url_var = tk.StringVar(value=self.api_client.base_url)
+        self.auth_user_var = tk.StringVar(value="Not logged in")
+        self.server_process: subprocess.Popen | None = None
+
         self.status_var = tk.StringVar(value="Ready")
         self._init_style()
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _init_style(self):
         style = ttk.Style()
@@ -114,7 +133,20 @@ class App:
         header = ttk.Frame(self.root)
         header.pack(fill=tk.X, padx=20, pady=(16, 8))
         ttk.Label(header, text=APP_TITLE, style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Label(header, text="PKI, Signatures, Encryption", style="Subheader.TLabel").pack(side=tk.LEFT, padx=12)
+        ttk.Label(header, text="PKI, Signatures, Encryption", style="Subheader.TLabel").pack(
+            side=tk.LEFT, padx=12
+        )
+        ttk.Label(header, text="Server").pack(side=tk.LEFT, padx=(20, 4))
+        ttk.Entry(header, textvariable=self.server_url_var, width=24).pack(side=tk.LEFT)
+        ttk.Button(header, text="Connect", command=self._connect_server, style="Secondary.TButton").pack(
+            side=tk.LEFT, padx=(6, 4)
+        )
+        ttk.Button(header, text="Register", command=self._register_user, style="Secondary.TButton").pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(header, text="Login", command=self._login_user, style="Primary.TButton").pack(side=tk.LEFT, padx=4)
+        ttk.Button(header, text="Logout", command=self._logout_user, style="Secondary.TButton").pack(side=tk.LEFT, padx=4)
+        ttk.Label(header, textvariable=self.auth_user_var, style="Subheader.TLabel").pack(side=tk.LEFT, padx=(10, 0))
         accent = tk.Frame(self.root, height=2, bg=COLOR_ACCENT)
         accent.pack(fill=tk.X, padx=20)
 
@@ -153,6 +185,7 @@ class App:
         frame = ttk.Labelframe(parent, text=title, padding=12)
         frame.configure(style="TLabelframe")
         return frame
+
     def _build_keys_tab(self):
         tab = self._tab_keys
         tab.columnconfigure(0, weight=1)
@@ -178,19 +211,22 @@ class App:
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        def _bind_mousewheel(_event):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _on_mousewheel_linux_up(_event):
+            canvas.yview_scroll(-1, "units")
 
-        def _unbind_mousewheel(_event):
-            canvas.unbind_all("<MouseWheel>")
+        def _on_mousewheel_linux_down(_event):
+            canvas.yview_scroll(1, "units")
 
         frame.bind("<Configure>", _on_frame_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
-        canvas.bind("<Enter>", _bind_mousewheel)
-        canvas.bind("<Leave>", _unbind_mousewheel)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_mousewheel_linux_up)
+        canvas.bind("<Button-5>", _on_mousewheel_linux_down)
 
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Key and Certificate Management", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
+        ttk.Label(frame, text="Key and Certificate Management", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(4, 12)
+        )
 
         section = self._section(frame, "Key Generation")
         section.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -198,15 +234,21 @@ class App:
 
         ttk.Label(section, text="Algorithm").grid(row=0, column=0, sticky="w")
         self.alg_var = tk.StringVar(value="RSA")
-        ttk.Combobox(section, textvariable=self.alg_var, values=["RSA", "ECC"], width=12).grid(row=0, column=1, sticky="w")
+        ttk.Combobox(section, textvariable=self.alg_var, values=["RSA", "ECC"], width=12).grid(
+            row=0, column=1, sticky="w"
+        )
 
         ttk.Label(section, text="RSA Key Size").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.rsa_size_var = tk.StringVar(value="2048")
-        ttk.Combobox(section, textvariable=self.rsa_size_var, values=["2048", "3072", "4096"], width=12).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(section, textvariable=self.rsa_size_var, values=["2048", "3072", "4096"], width=12).grid(
+            row=1, column=1, sticky="w", pady=(8, 0)
+        )
 
         ttk.Label(section, text="ECC Curve").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.curve_var = tk.StringVar(value="secp256r1")
-        ttk.Combobox(section, textvariable=self.curve_var, values=["secp256r1", "secp384r1", "secp521r1"], width=14).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            section, textvariable=self.curve_var, values=["secp256r1", "secp384r1", "secp521r1"], width=14
+        ).grid(row=2, column=1, sticky="w", pady=(8, 0))
 
         ttk.Label(section, text="Subject CN").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.cn_var = tk.StringVar(value="Example User")
@@ -219,20 +261,53 @@ class App:
         ttk.Label(section, text="Output Folder").grid(row=5, column=0, sticky="w", pady=(8, 0))
         self.output_var = tk.StringVar(value=str(self.output_dir))
         ttk.Entry(section, textvariable=self.output_var, width=60).grid(row=5, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(section, text="Browse", command=self._choose_output_dir, style="Secondary.TButton").grid(row=5, column=2, padx=8, pady=(8, 0))
+        ttk.Button(section, text="Browse", command=self._choose_output_dir, style="Secondary.TButton").grid(
+            row=5, column=2, padx=8, pady=(8, 0)
+        )
 
         ttk.Label(section, text="Private Key Password (optional)").grid(row=6, column=0, sticky="w", pady=(8, 0))
         self.key_pwd_var = tk.StringVar()
-        ttk.Entry(section, textvariable=self.key_pwd_var, width=24, show="*").grid(row=6, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(section, textvariable=self.key_pwd_var, width=24, show="*").grid(
+            row=6, column=1, sticky="w", pady=(8, 0)
+        )
 
-        ttk.Button(section, text="Generate Key Pair", command=self._generate_keypair, style="Primary.TButton").grid(row=7, column=0, pady=12, sticky="w")
-        ttk.Button(section, text="Create Self-Signed Cert", command=self._create_self_signed, style="Secondary.TButton").grid(row=7, column=1, pady=12, sticky="w")
-        ttk.Button(section, text="Create CSR", command=self._create_csr, style="Secondary.TButton").grid(row=7, column=2, pady=12, sticky="w")
+        ttk.Button(section, text="Generate Key Pair", command=self._generate_keypair, style="Primary.TButton").grid(
+            row=7, column=0, pady=12, sticky="w"
+        )
+        ttk.Button(section, text="Create Self-Signed Cert", command=self._create_self_signed, style="Secondary.TButton").grid(
+            row=7, column=1, pady=12, sticky="w"
+        )
+        ttk.Button(section, text="Create CSR", command=self._create_csr, style="Secondary.TButton").grid(
+            row=7, column=2, pady=12, sticky="w"
+        )
 
         csr_section = self._section(frame, "CSR Signing (CA)")
         csr_section.grid(row=2, column=0, columnspan=3, sticky="we", pady=(0, 12))
-        ttk.Label(csr_section, text="Select CA key, CA certificate, and CSR to issue a signed cert.").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Button(csr_section, text="Sign CSR", command=self._sign_csr, style="Primary.TButton").grid(row=1, column=0, pady=10, sticky="w")
+        csr_section.columnconfigure(1, weight=1)
+        ttk.Label(csr_section, text="Select CA key, CA certificate, and CSR to issue a signed cert.").grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        ttk.Label(csr_section, text="CA Private Key").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.ca_key_var = tk.StringVar()
+        ttk.Entry(csr_section, textvariable=self.ca_key_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
+        ttk.Button(csr_section, text="Browse", command=self._choose_ca_key, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
+        ttk.Label(csr_section, text="CA Certificate").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.ca_cert_var = tk.StringVar()
+        ttk.Entry(csr_section, textvariable=self.ca_cert_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
+        ttk.Button(csr_section, text="Browse", command=self._choose_ca_cert, style="Secondary.TButton").grid(
+            row=2, column=2, padx=8, pady=(8, 0)
+        )
+        ttk.Label(csr_section, text="CSR File").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.csr_file_var = tk.StringVar()
+        ttk.Entry(csr_section, textvariable=self.csr_file_var, width=60).grid(row=3, column=1, sticky="we", pady=(8, 0))
+        ttk.Button(csr_section, text="Browse", command=self._choose_csr_file, style="Secondary.TButton").grid(
+            row=3, column=2, padx=8, pady=(8, 0)
+        )
+        ttk.Button(csr_section, text="Sign CSR", command=self._sign_csr, style="Primary.TButton").grid(
+            row=4, column=0, pady=10, sticky="w"
+        )
 
         revoke_section = self._section(frame, "Certificate Revocation (CRL)")
         revoke_section.grid(row=3, column=0, columnspan=3, sticky="we")
@@ -240,17 +315,25 @@ class App:
         ttk.Label(revoke_section, text="Certificate to Revoke").grid(row=0, column=0, sticky="w")
         self.revoke_cert_var = tk.StringVar()
         ttk.Entry(revoke_section, textvariable=self.revoke_cert_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(revoke_section, text="Browse", command=self._choose_revoke_cert, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(revoke_section, text="Browse", command=self._choose_revoke_cert, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
         ttk.Label(revoke_section, text="Reason").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.revoke_reason_var = tk.StringVar(value="Key compromise")
-        ttk.Entry(revoke_section, textvariable=self.revoke_reason_var, width=40).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(revoke_section, text="Revoke", command=self._revoke_cert, style="Primary.TButton").grid(row=2, column=0, pady=10, sticky="w")
+        ttk.Entry(revoke_section, textvariable=self.revoke_reason_var, width=40).grid(
+            row=1, column=1, sticky="w", pady=(8, 0)
+        )
+        ttk.Button(revoke_section, text="Revoke", command=self._revoke_cert, style="Primary.TButton").grid(
+            row=2, column=0, pady=10, sticky="w"
+        )
 
     def _build_sign_tab(self):
         frame = self._tab_sign
         frame.configure(padding=16)
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Digital Signatures", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
+        ttk.Label(frame, text="Digital Signatures", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(4, 12)
+        )
 
         sign_section = self._section(frame, "Sign")
         sign_section.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -259,24 +342,40 @@ class App:
         ttk.Label(sign_section, text="File to Sign").grid(row=0, column=0, sticky="w")
         self.sign_file_var = tk.StringVar()
         ttk.Entry(sign_section, textvariable=self.sign_file_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(sign_section, text="Browse", command=self._choose_sign_file, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(sign_section, text="Browse", command=self._choose_sign_file, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(sign_section, text="Private Key (for signing)").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.sign_key_var = tk.StringVar()
-        ttk.Entry(sign_section, textvariable=self.sign_key_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(sign_section, text="Browse", command=self._choose_sign_key, style="Secondary.TButton").grid(row=1, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(sign_section, textvariable=self.sign_key_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(sign_section, text="Browse", command=self._choose_sign_key, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
 
         ttk.Label(sign_section, text="Certificate (optional)").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.sign_cert_var = tk.StringVar()
-        ttk.Entry(sign_section, textvariable=self.sign_cert_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(sign_section, text="Browse", command=self._choose_sign_cert, style="Secondary.TButton").grid(row=2, column=2, padx=8)
+        ttk.Entry(sign_section, textvariable=self.sign_cert_var, width=60).grid(
+            row=2, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(sign_section, text="Browse", command=self._choose_sign_cert, style="Secondary.TButton").grid(
+            row=2, column=2, padx=8
+        )
 
         ttk.Label(sign_section, text="Signature Output (.json)").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.sig_out_var = tk.StringVar(value=str(self.output_dir / "signature.json"))
-        ttk.Entry(sign_section, textvariable=self.sig_out_var, width=60).grid(row=3, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(sign_section, text="Browse", command=self._choose_sig_out, style="Secondary.TButton").grid(row=3, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(sign_section, textvariable=self.sig_out_var, width=60).grid(
+            row=3, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(sign_section, text="Browse", command=self._choose_sig_out, style="Secondary.TButton").grid(
+            row=3, column=2, padx=8, pady=(8, 0)
+        )
 
-        ttk.Button(sign_section, text="Sign File", command=self._sign_file, style="Primary.TButton").grid(row=4, column=0, pady=12, sticky="w")
+        ttk.Button(sign_section, text="Sign File", command=self._sign_file, style="Primary.TButton").grid(
+            row=4, column=0, pady=12, sticky="w"
+        )
 
         verify_section = self._section(frame, "Verify")
         verify_section.grid(row=2, column=0, columnspan=3, sticky="we")
@@ -285,24 +384,39 @@ class App:
         ttk.Label(verify_section, text="Signature File (.json)").grid(row=0, column=0, sticky="w", pady=(4, 0))
         self.sig_in_var = tk.StringVar()
         ttk.Entry(verify_section, textvariable=self.sig_in_var, width=60).grid(row=0, column=1, sticky="we", pady=(4, 0))
-        ttk.Button(verify_section, text="Browse", command=self._choose_sig_in, style="Secondary.TButton").grid(row=0, column=2, padx=8, pady=(4, 0))
+        ttk.Button(verify_section, text="Browse", command=self._choose_sig_in, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8, pady=(4, 0)
+        )
 
         ttk.Label(verify_section, text="File to Verify").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.verify_file_var = tk.StringVar()
-        ttk.Entry(verify_section, textvariable=self.verify_file_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(verify_section, text="Browse", command=self._choose_verify_file, style="Secondary.TButton").grid(row=1, column=2, padx=8)
+        ttk.Entry(verify_section, textvariable=self.verify_file_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(verify_section, text="Browse", command=self._choose_verify_file, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8
+        )
 
         ttk.Label(verify_section, text="Public Key / Cert").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.verify_key_var = tk.StringVar()
-        ttk.Entry(verify_section, textvariable=self.verify_key_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(verify_section, text="Browse", command=self._choose_verify_key, style="Secondary.TButton").grid(row=2, column=2, padx=8)
+        ttk.Entry(verify_section, textvariable=self.verify_key_var, width=60).grid(
+            row=2, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(verify_section, text="Browse", command=self._choose_verify_key, style="Secondary.TButton").grid(
+            row=2, column=2, padx=8
+        )
 
-        ttk.Button(verify_section, text="Verify", command=self._verify_file, style="Primary.TButton").grid(row=3, column=0, pady=12, sticky="w")
+        ttk.Button(verify_section, text="Verify", command=self._verify_file, style="Primary.TButton").grid(
+            row=3, column=0, pady=12, sticky="w"
+        )
+
     def _build_encrypt_tab(self):
         frame = self._tab_encrypt
         frame.configure(padding=16)
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Hybrid Encryption", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
+        ttk.Label(frame, text="Hybrid Encryption", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(4, 12)
+        )
 
         enc_section = self._section(frame, "Encrypt")
         enc_section.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -311,19 +425,31 @@ class App:
         ttk.Label(enc_section, text="File to Encrypt").grid(row=0, column=0, sticky="w")
         self.enc_file_var = tk.StringVar()
         ttk.Entry(enc_section, textvariable=self.enc_file_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(enc_section, text="Browse", command=self._choose_enc_file, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(enc_section, text="Browse", command=self._choose_enc_file, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(enc_section, text="Recipient Public Key / Cert").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.enc_pub_var = tk.StringVar()
-        ttk.Entry(enc_section, textvariable=self.enc_pub_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(enc_section, text="Browse", command=self._choose_enc_pub, style="Secondary.TButton").grid(row=1, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(enc_section, textvariable=self.enc_pub_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(enc_section, text="Browse", command=self._choose_enc_pub, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
 
         ttk.Label(enc_section, text="Encrypted Output (.json)").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.enc_out_var = tk.StringVar(value=str(self.output_dir / "encrypted.json"))
-        ttk.Entry(enc_section, textvariable=self.enc_out_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(enc_section, text="Browse", command=self._choose_enc_out, style="Secondary.TButton").grid(row=2, column=2, padx=8)
+        ttk.Entry(enc_section, textvariable=self.enc_out_var, width=60).grid(
+            row=2, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(enc_section, text="Browse", command=self._choose_enc_out, style="Secondary.TButton").grid(
+            row=2, column=2, padx=8
+        )
 
-        ttk.Button(enc_section, text="Encrypt", command=self._encrypt_file, style="Primary.TButton").grid(row=3, column=0, pady=12, sticky="w")
+        ttk.Button(enc_section, text="Encrypt", command=self._encrypt_file, style="Primary.TButton").grid(
+            row=3, column=0, pady=12, sticky="w"
+        )
 
         dec_section = self._section(frame, "Decrypt")
         dec_section.grid(row=2, column=0, columnspan=3, sticky="we")
@@ -332,25 +458,38 @@ class App:
         ttk.Label(dec_section, text="Encrypted Input (.json)").grid(row=0, column=0, sticky="w")
         self.dec_in_var = tk.StringVar()
         ttk.Entry(dec_section, textvariable=self.dec_in_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(dec_section, text="Browse", command=self._choose_dec_in, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(dec_section, text="Browse", command=self._choose_dec_in, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(dec_section, text="Recipient Private Key").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.dec_key_var = tk.StringVar()
-        ttk.Entry(dec_section, textvariable=self.dec_key_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(dec_section, text="Browse", command=self._choose_dec_key, style="Secondary.TButton").grid(row=1, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(dec_section, textvariable=self.dec_key_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(dec_section, text="Browse", command=self._choose_dec_key, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
 
         ttk.Label(dec_section, text="Decrypted Output File").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.dec_out_var = tk.StringVar(value=str(self.output_dir / "decrypted.out"))
-        ttk.Entry(dec_section, textvariable=self.dec_out_var, width=60).grid(row=2, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(dec_section, text="Browse", command=self._choose_dec_out, style="Secondary.TButton").grid(row=2, column=2, padx=8)
+        ttk.Entry(dec_section, textvariable=self.dec_out_var, width=60).grid(
+            row=2, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(dec_section, text="Browse", command=self._choose_dec_out, style="Secondary.TButton").grid(
+            row=2, column=2, padx=8
+        )
 
-        ttk.Button(dec_section, text="Decrypt", command=self._decrypt_file, style="Primary.TButton").grid(row=3, column=0, pady=12, sticky="w")
-
+        ttk.Button(dec_section, text="Decrypt", command=self._decrypt_file, style="Primary.TButton").grid(
+            row=3, column=0, pady=12, sticky="w"
+        )
     def _build_keystore_tab(self):
         frame = self._tab_keystore
         frame.configure(padding=16)
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Password-Protected Keystore (PKCS#12)", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
+        ttk.Label(frame, text="Password-Protected Keystore (PKCS#12)", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(4, 12)
+        )
 
         create_section = self._section(frame, "Create Keystore")
         create_section.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -359,23 +498,37 @@ class App:
         ttk.Label(create_section, text="Private Key").grid(row=0, column=0, sticky="w")
         self.ks_key_var = tk.StringVar()
         ttk.Entry(create_section, textvariable=self.ks_key_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(create_section, text="Browse", command=self._choose_ks_key, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(create_section, text="Browse", command=self._choose_ks_key, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(create_section, text="Certificate").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.ks_cert_var = tk.StringVar()
-        ttk.Entry(create_section, textvariable=self.ks_cert_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(create_section, text="Browse", command=self._choose_ks_cert, style="Secondary.TButton").grid(row=1, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(create_section, textvariable=self.ks_cert_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(create_section, text="Browse", command=self._choose_ks_cert, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
 
         ttk.Label(create_section, text="Keystore Password").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.ks_pwd_var = tk.StringVar()
-        ttk.Entry(create_section, textvariable=self.ks_pwd_var, width=20, show="*").grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(create_section, textvariable=self.ks_pwd_var, width=20, show="*").grid(
+            row=2, column=1, sticky="w", pady=(8, 0)
+        )
 
         ttk.Label(create_section, text="Keystore Output (.p12)").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.ks_out_var = tk.StringVar(value=str(self.output_dir / "keystore.p12"))
-        ttk.Entry(create_section, textvariable=self.ks_out_var, width=60).grid(row=3, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(create_section, text="Browse", command=self._choose_ks_out, style="Secondary.TButton").grid(row=3, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(create_section, textvariable=self.ks_out_var, width=60).grid(
+            row=3, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(create_section, text="Browse", command=self._choose_ks_out, style="Secondary.TButton").grid(
+            row=3, column=2, padx=8, pady=(8, 0)
+        )
 
-        ttk.Button(create_section, text="Create Keystore", command=self._create_keystore, style="Primary.TButton").grid(row=4, column=0, pady=12, sticky="w")
+        ttk.Button(create_section, text="Create Keystore", command=self._create_keystore, style="Primary.TButton").grid(
+            row=4, column=0, pady=12, sticky="w"
+        )
 
         load_section = self._section(frame, "Load Keystore")
         load_section.grid(row=2, column=0, columnspan=3, sticky="we")
@@ -383,18 +536,27 @@ class App:
         ttk.Label(load_section, text="Keystore File (.p12)").grid(row=0, column=0, sticky="w")
         self.ks_in_var = tk.StringVar()
         ttk.Entry(load_section, textvariable=self.ks_in_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(load_section, text="Browse", command=self._choose_ks_in, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(load_section, text="Browse", command=self._choose_ks_in, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(load_section, text="Password").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.ks_in_pwd_var = tk.StringVar()
-        ttk.Entry(load_section, textvariable=self.ks_in_pwd_var, width=20, show="*").grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(load_section, textvariable=self.ks_in_pwd_var, width=20, show="*").grid(
+            row=1, column=1, sticky="w", pady=(8, 0)
+        )
 
-        ttk.Button(load_section, text="Load Keystore", command=self._load_keystore, style="Primary.TButton").grid(row=2, column=0, pady=12, sticky="w")
+        ttk.Button(load_section, text="Load Keystore", command=self._load_keystore, style="Primary.TButton").grid(
+            row=2, column=0, pady=12, sticky="w"
+        )
+
     def _build_attacks_tab(self):
         frame = self._tab_attacks
         frame.configure(padding=16)
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="Attack Simulations", style="Header.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 12))
+        ttk.Label(frame, text="Attack Simulations", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(4, 12)
+        )
 
         mitm_section = self._section(frame, "MITM Detection (Certificate Pinning)")
         mitm_section.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 12))
@@ -402,14 +564,22 @@ class App:
         ttk.Label(mitm_section, text="Expected Cert").grid(row=0, column=0, sticky="w")
         self.mitm_expected_var = tk.StringVar()
         ttk.Entry(mitm_section, textvariable=self.mitm_expected_var, width=60).grid(row=0, column=1, sticky="we")
-        ttk.Button(mitm_section, text="Browse", command=self._choose_mitm_expected, style="Secondary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(mitm_section, text="Browse", command=self._choose_mitm_expected, style="Secondary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
         ttk.Label(mitm_section, text="Presented Cert").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.mitm_presented_var = tk.StringVar()
-        ttk.Entry(mitm_section, textvariable=self.mitm_presented_var, width=60).grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Button(mitm_section, text="Browse", command=self._choose_mitm_presented, style="Secondary.TButton").grid(row=1, column=2, padx=8, pady=(8, 0))
+        ttk.Entry(mitm_section, textvariable=self.mitm_presented_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=(8, 0)
+        )
+        ttk.Button(mitm_section, text="Browse", command=self._choose_mitm_presented, style="Secondary.TButton").grid(
+            row=1, column=2, padx=8, pady=(8, 0)
+        )
 
-        ttk.Button(mitm_section, text="Simulate MITM", command=self._simulate_mitm, style="Primary.TButton").grid(row=2, column=0, pady=12, sticky="w")
+        ttk.Button(mitm_section, text="Simulate MITM", command=self._simulate_mitm, style="Primary.TButton").grid(
+            row=2, column=0, pady=12, sticky="w"
+        )
 
         replay_section = self._section(frame, "Replay Attack Simulation")
         replay_section.grid(row=2, column=0, columnspan=3, sticky="we")
@@ -417,7 +587,9 @@ class App:
         ttk.Label(replay_section, text="Nonce Value").grid(row=0, column=0, sticky="w")
         self.replay_nonce_var = tk.StringVar()
         ttk.Entry(replay_section, textvariable=self.replay_nonce_var, width=40).grid(row=0, column=1, sticky="w")
-        ttk.Button(replay_section, text="Simulate Replay", command=self._simulate_replay, style="Primary.TButton").grid(row=0, column=2, padx=8)
+        ttk.Button(replay_section, text="Simulate Replay", command=self._simulate_replay, style="Primary.TButton").grid(
+            row=0, column=2, padx=8
+        )
 
     def _build_logs_tab(self):
         frame = self._tab_logs
@@ -443,6 +615,198 @@ class App:
         self.log_text.insert(tk.END, msg + "\n")
         self.log_text.see(tk.END)
         self.status_var.set(msg)
+
+    def _refresh_auth_label(self):
+        session = self.api_client.session
+        if session is None:
+            self.auth_user_var.set("Not logged in")
+        else:
+            self.auth_user_var.set(f"{session.username} ({session.role})")
+
+    def _on_close(self):
+        if self.server_process is not None:
+            try:
+                self.server_process.terminate()
+            except Exception:
+                pass
+            self.server_process = None
+        self.root.destroy()
+
+    def _is_local_server_url(self) -> bool:
+        url = self.server_url_var.get().strip().rstrip("/")
+        return url in {
+            "http://127.0.0.1:8765",
+            "http://localhost:8765",
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+        }
+
+    def _start_local_server(self) -> bool:
+        if self.server_process is not None and self.server_process.poll() is None:
+            return True
+        server_script = self.base_dir / "server.py"
+        if not server_script.exists():
+            self._log("server.py not found; cannot auto-start backend")
+            return False
+        try:
+            self.server_process = subprocess.Popen(
+                [sys.executable, str(server_script)],
+                cwd=str(self.base_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            self._log(f"Failed to start backend: {exc}")
+            return False
+
+        for _ in range(24):
+            try:
+                self.api_client.health()
+                self._log("Local backend started")
+                return True
+            except APIClientError:
+                time.sleep(0.25)
+        self._log("Local backend did not become ready in time")
+        return False
+
+    def _ensure_server_ready(self) -> bool:
+        try:
+            self.api_client.health()
+            return True
+        except APIClientError as exc:
+            if self._is_local_server_url():
+                self._log(f"Server not reachable; attempting auto-start ({exc})")
+                return self._start_local_server()
+            self._log(f"Server not reachable: {exc}")
+            return False
+
+    def _connect_server(self):
+        self.api_client.set_base_url(self.server_url_var.get().strip())
+        if self._ensure_server_ready():
+            self._log("Server connected")
+            messagebox.showinfo("Server", f"Connected to {self.api_client.base_url}")
+        else:
+            messagebox.showerror("Server connection failed", f"Could not connect to {self.api_client.base_url}")
+
+    def _prompt_credentials(self, title: str):
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        username_var = tk.StringVar()
+        password_var = tk.StringVar()
+        role_var = tk.StringVar(value="user")
+        result = {"ok": False}
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Username").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=username_var, width=28).grid(row=0, column=1, sticky="we", pady=(0, 8))
+        ttk.Label(frame, text="Password").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=password_var, width=28, show="*").grid(row=1, column=1, sticky="we")
+
+        if title == "Register":
+            ttk.Label(frame, text="Role").grid(row=2, column=0, sticky="w", pady=(8, 0))
+            ttk.Combobox(frame, textvariable=role_var, values=["user", "admin"], width=10).grid(
+                row=2, column=1, sticky="w", pady=(8, 0)
+            )
+            button_row = 3
+        else:
+            button_row = 2
+
+        def _submit():
+            result["ok"] = True
+            result["username"] = username_var.get().strip()
+            result["password"] = password_var.get()
+            result["role"] = role_var.get().strip() or "user"
+            dialog.destroy()
+
+        def _cancel():
+            dialog.destroy()
+
+        ttk.Button(frame, text="Submit", command=_submit, style="Primary.TButton").grid(
+            row=button_row, column=0, pady=(12, 0), sticky="w"
+        )
+        ttk.Button(frame, text="Cancel", command=_cancel, style="Secondary.TButton").grid(
+            row=button_row, column=1, pady=(12, 0), sticky="e"
+        )
+
+        dialog.wait_window()
+        return result
+
+    def _register_user(self):
+        creds = self._prompt_credentials("Register")
+        if not creds.get("ok"):
+            return
+        if not creds.get("username") or not creds.get("password"):
+            messagebox.showwarning("Missing", "Username and password are required")
+            return
+        self.api_client.set_base_url(self.server_url_var.get().strip())
+        if not self._ensure_server_ready():
+            messagebox.showerror("Register failed", "Server is not reachable. Click Connect first.")
+            return
+        try:
+            msg = self.api_client.register(creds["username"], creds["password"], creds["role"])
+            self._log(msg)
+            messagebox.showinfo("Register", msg)
+        except APIClientError as exc:
+            error_text = str(exc)
+            self._log(f"Register failed: {error_text}")
+            if "409:" in error_text and "already exists" in error_text:
+                messagebox.showwarning("Register failed", "Username already exists. Use Login instead.")
+            else:
+                messagebox.showerror("Register failed", error_text)
+
+    def _login_user(self):
+        creds = self._prompt_credentials("Login")
+        if not creds.get("ok"):
+            return
+        if not creds.get("username") or not creds.get("password"):
+            messagebox.showwarning("Missing", "Username and password are required")
+            return
+        self.api_client.set_base_url(self.server_url_var.get().strip())
+        if not self._ensure_server_ready():
+            messagebox.showerror("Login failed", "Server is not reachable. Click Connect first.")
+            return
+        try:
+            session = self.api_client.login(creds["username"], creds["password"])
+            self._refresh_auth_label()
+            self._log(f"Logged in as {session.username} ({session.role})")
+            messagebox.showinfo("Login", f"Logged in as {session.username}")
+        except APIClientError as exc:
+            error_text = str(exc)
+            self._log(f"Login failed: {error_text}")
+            if "401:" in error_text:
+                messagebox.showerror("Login failed", "Invalid username or password.")
+            else:
+                messagebox.showerror("Login failed", error_text)
+
+    def _logout_user(self):
+        try:
+            msg = self.api_client.logout()
+            self._refresh_auth_label()
+            self._log(msg)
+            messagebox.showinfo("Logout", msg)
+        except APIClientError as exc:
+            self._log(f"Logout failed: {exc}")
+            messagebox.showerror("Logout failed", str(exc))
+
+    def _is_server_revoked(self, fingerprint: str) -> bool:
+        status = self.api_client.revocation_status(fingerprint)
+        return bool(status.get("revoked", False))
+
+    def _upload_cert_if_authenticated(self, cert_path: Path) -> None:
+        if not self.api_client.is_authenticated:
+            return
+        try:
+            pem = cert_path.read_text(encoding="utf-8")
+            rec = self.api_client.upload_certificate(pem)
+            self._log(f"Certificate registered on server: {rec.get('fingerprint', '')}")
+        except Exception as exc:
+            self._log(f"Certificate upload skipped: {exc}")
 
     def _private_key_password(self):
         pwd = self.key_pwd_var.get()
@@ -555,6 +919,25 @@ class App:
         path = filedialog.askopenfilename()
         if path:
             self.revoke_cert_var.set(path)
+
+    def _choose_ca_key(self):
+        path = filedialog.askopenfilename(filetypes=[("PEM Files", "*.pem"), ("All Files", "*.*")])
+        if path:
+            self.ca_key_var.set(path)
+
+    def _choose_ca_cert(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Certificate Files", "*.pem *.crt *.cer"), ("All Files", "*.*")]
+        )
+        if path:
+            self.ca_cert_var.set(path)
+
+    def _choose_csr_file(self):
+        path = filedialog.askopenfilename(filetypes=[("CSR Files", "*.csr *.pem"), ("All Files", "*.*")])
+        if path:
+            self.csr_file_var.set(path)
+            self._warn_if_not_csr(Path(path))
+
     def _generate_keypair(self):
         alg = self.alg_var.get()
         key_size = int(self.rsa_size_var.get())
@@ -576,6 +959,7 @@ class App:
         out_dir = Path(self.output_var.get())
         save_private_key_pem(out_dir / "private_key.pem", priv, self._private_key_password())
         save_cert_pem(out_dir / "certificate.pem", cert)
+        self._upload_cert_if_authenticated(out_dir / "certificate.pem")
         self._log(f"Created self-signed cert for {subject_cn}")
 
     def _create_csr(self):
@@ -591,12 +975,21 @@ class App:
         self._log(f"CSR created for {subject_cn}")
 
     def _sign_csr(self):
-        ca_key_path = filedialog.askopenfilename(title="Select CA Private Key")
-        ca_cert_path = filedialog.askopenfilename(title="Select CA Certificate")
-        csr_path = filedialog.askopenfilename(title="Select CSR")
+        ca_key_path = self.ca_key_var.get().strip()
+        ca_cert_path = self.ca_cert_var.get().strip()
+        csr_path = self.csr_file_var.get().strip()
         if not (ca_key_path and ca_cert_path and csr_path):
+            messagebox.showwarning("Missing", "Select CA private key, CA certificate, and CSR file")
             return
         try:
+            if not self._is_csr_file(Path(csr_path)):
+                suggestion = Path(csr_path).with_name("request.csr")
+                hint = f"Use a CSR file (e.g., {suggestion})" if suggestion.exists() else "Use a CSR file (request.csr)"
+                messagebox.showerror(
+                    "CSR signing failed",
+                    f"The selected file is not a CSR. {hint}",
+                )
+                return
             ca_key = self._load_private_key_from_path(Path(ca_key_path))
             ca_cert = load_cert_pem(Path(ca_cert_path))
             csr = x509.load_pem_x509_csr(Path(csr_path).read_bytes())
@@ -604,10 +997,25 @@ class App:
             cert = crypto.sign_csr(ca_key, ca_cert, csr, days)
             out_dir = Path(self.output_var.get())
             save_cert_pem(out_dir / "signed_certificate.pem", cert)
+            self._upload_cert_if_authenticated(out_dir / "signed_certificate.pem")
             self._log("CSR signed by CA")
         except Exception as exc:
             self._log(f"CSR signing failed: {exc}")
             messagebox.showerror("CSR signing failed", str(exc))
+
+    def _is_csr_file(self, path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        return "BEGIN CERTIFICATE REQUEST" in text or "BEGIN NEW CERTIFICATE REQUEST" in text
+
+    def _warn_if_not_csr(self, path: Path) -> None:
+        if self._is_csr_file(path):
+            return
+        suggestion = path.with_name("request.csr")
+        hint = f"Use a CSR file (e.g., {suggestion})" if suggestion.exists() else "Use a CSR file (request.csr)"
+        messagebox.showwarning("Not a CSR", f"The selected file is not a CSR. {hint}")
 
     def _sign_file(self):
         if not self.sign_file_var.get() or not self.sign_key_var.get():
@@ -619,9 +1027,11 @@ class App:
             cert_path = self.sign_cert_var.get()
             signer_cert = load_cert_pem(Path(cert_path)) if cert_path else None
             private_key = self._load_private_key_from_path(key_path)
-            blob = crypto.sign_file(file_path, private_key, signer_cert, self.data_store)
+            blob = crypto.sign_file(file_path, private_key, signer_cert)
             out_path = Path(self.sig_out_var.get())
             write_json(out_path, blob)
+            if cert_path:
+                self._upload_cert_if_authenticated(Path(cert_path))
             self._log(f"Signed file {file_path.name} -> {out_path}")
         except Exception as exc:
             self._log(f"Sign failed: {exc}")
@@ -644,10 +1054,17 @@ class App:
                 try:
                     cert = load_cert_pem(key_path)
                     public_key = cert.public_key()
-                    if self.data_store.is_revoked(cert_fingerprint_sha256(cert)):
-                        self._log("Verification failed: certificate revoked")
-                        messagebox.showerror("Revoked", "Certificate revoked")
-                        return
+                    fingerprint = cert_fingerprint_sha256(cert)
+                    if self.api_client.is_authenticated:
+                        if self._is_server_revoked(fingerprint):
+                            self._log("Verification failed: certificate revoked (server)")
+                            messagebox.showerror("Revoked", "Certificate revoked (server)")
+                            return
+                    else:
+                        if self.data_store.is_revoked(fingerprint):
+                            self._log("Verification failed: certificate revoked (local)")
+                            messagebox.showerror("Revoked", "Certificate revoked (local)")
+                            return
                 except Exception:
                     public_key = load_public_key(key_path)
             else:
@@ -769,13 +1186,16 @@ class App:
         if not self.revoke_cert_var.get():
             messagebox.showwarning("Missing", "Select a certificate to revoke")
             return
+        if not self.api_client.is_authenticated:
+            messagebox.showwarning("Login required", "Login is required to revoke certificates in multi-user mode")
+            return
         try:
             cert = load_cert_pem(Path(self.revoke_cert_var.get()))
             fp = cert_fingerprint_sha256(cert)
             reason = self.revoke_reason_var.get().strip() or "Unspecified"
-            self.data_store.add_revoked(fp, reason)
-            self._log(f"Revoked cert fingerprint {fp} ({reason})")
-            messagebox.showinfo("Revoked", "Certificate revoked and added to CRL")
+            msg = self.api_client.revoke_certificate(fp, reason)
+            self._log(f"{msg}: {fp}")
+            messagebox.showinfo("Revoked", msg)
         except Exception as exc:
             self._log(f"CRL update failed: {exc}")
             messagebox.showerror("CRL update failed", str(exc))

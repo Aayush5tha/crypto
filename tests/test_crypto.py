@@ -1,8 +1,6 @@
 ﻿from pathlib import Path
 import tempfile
 
-from cryptography.hazmat.primitives.asymmetric import ec
-
 from pki_gui_tool import crypto
 from pki_gui_tool.storage import DataStore
 
@@ -14,7 +12,7 @@ def test_sign_verify_roundtrip():
         priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
         data_path = base / "data.txt"
         data_path.write_text("hello")
-        blob = crypto.sign_file(data_path, priv, None, store)
+        blob = crypto.sign_file(data_path, priv, None)
         result = crypto.verify_file(data_path, blob, pub, store)
         assert result.ok
 
@@ -26,7 +24,7 @@ def test_verify_same_signature_multiple_times_when_replay_not_enforced():
         priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
         data_path = base / "data.txt"
         data_path.write_text("hello")
-        blob = crypto.sign_file(data_path, priv, None, store)
+        blob = crypto.sign_file(data_path, priv, None)
         first = crypto.verify_file(data_path, blob, pub, store)
         second = crypto.verify_file(data_path, blob, pub, store)
         assert first.ok
@@ -80,7 +78,7 @@ def test_verify_handles_invalid_base64_signature():
         priv, pub = crypto.generate_keypair("RSA", 2048, "secp256r1")
         data_path = base / "data.txt"
         data_path.write_text("hello")
-        blob = crypto.sign_file(data_path, priv, None, store)
+        blob = crypto.sign_file(data_path, priv, None)
         blob["signature"] = "not-base64-@@@"
         result = crypto.verify_file(data_path, blob, pub, store)
         assert not result.ok

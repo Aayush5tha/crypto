@@ -1,16 +1,18 @@
-﻿# PKI Forge - GUI Cryptography Tool
+﻿# PKI Forge - Multi-User Cryptography Tool
 
-A polished, GUI-based cryptographic tool that demonstrates PKI workflows, digital signatures, hybrid encryption, secure key storage, and attack simulations. Built for the ST6051CEM Practical Cryptography coursework.
+PKI Forge is a GUI cryptography tool with a shared multi-user backend.
+It supports authenticated users, certificate registry, server-side revocation, and PKI workflows.
 
 ## Features
-- Key and certificate management (RSA/ECC)
-- Self-signed certs, CSR creation, CA signing
-- Digital signatures with replay protection (nonce cache)
+- Multi-user accounts with login sessions (server-backed)
+- Role-aware certificate revocation (owner/admin)
+- Shared certificate registry for all users
+- Key/certificate management (RSA/ECC)
+- CSR generation and CA signing
+- Digital signatures and verification
 - Hybrid encryption (RSA-OAEP+AES-GCM, ECDH+AES-GCM)
 - Password-protected keystore (PKCS#12)
-- Certificate revocation list (CRL)
-- MITM and replay attack simulations
-- GUI-first workflow and clear logging
+- MITM and replay simulations
 
 ## Quick Start
 ```powershell
@@ -18,22 +20,27 @@ cd C:\Users\denis\.vscode\python\pki_gui_tool
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+### 1. Start backend API
+```powershell
+python server.py
+```
+
+### 2. Start GUI
+Open a second terminal:
+```powershell
+cd C:\Users\denis\.vscode\python\pki_gui_tool
+.\.venv\Scripts\activate
 python app.py
 ```
 
-## Usage Notes
-- All generated artifacts are stored in `data/output` by default, but you can change this in the GUI.
-- The signature file is a JSON structure containing metadata, file hash, and a replay-resistant nonce.
-- Verification checks: signature correctness, file integrity, and replay detection.
-- Encryption outputs a JSON package (encrypted content + key wrapping / ephemeral key).
-
-## Use Cases (Examples)
-1. **Secure document signing for academic submissions**
-   - Sign PDFs or documents. Verification ensures integrity and authenticity.
-2. **Encrypted file transfer between departments**
-   - Hybrid encryption for secure exchange using a recipient’s public key.
-3. **Device-to-device trust bootstrap**
-   - Generate CSRs, issue certs with a local CA, and revoke compromised keys.
+## Multi-User Flow
+1. In GUI header, verify server URL (default `http://127.0.0.1:8765`) and click `Connect`.
+2. Click `Register` to create users.
+3. Click `Login` to start a session.
+4. Certificate revocation in `Keys & Certs` uses shared server state.
+5. Signature verification checks revocation against server when logged in.
 
 ## Testing
 ```powershell
@@ -41,17 +48,22 @@ pytest -q
 ```
 
 ## Project Structure
-- `app.py` - entrypoint for the GUI
-- `pki_gui_tool/gui.py` - user interface
-- `pki_gui_tool/crypto.py` - cryptographic primitives and workflows
-- `pki_gui_tool/storage.py` - keystore, CRL, nonce cache
-- `pki_gui_tool/attacks.py` - MITM and replay simulations
-- `tests/` - unit tests
+- `app.py` - GUI entrypoint
+- `server.py` - backend entrypoint (FastAPI/uvicorn)
+- `pki_gui_tool/gui.py` - desktop GUI
+- `pki_gui_tool/api_client.py` - GUI API client
+- `pki_gui_tool/server/main.py` - API routes/auth logic
+- `pki_gui_tool/server/database.py` - SQLite schema/init
+- `pki_gui_tool/crypto.py` - cryptographic workflows
+- `tests/test_crypto.py` - crypto tests
+- `tests/test_server.py` - backend API tests
 
-## Security Notes
-- Private keys can be stored encrypted (PKCS#12) with a password.
-- Replay detection is enforced via nonce cache.
-- MITM simulation is based on certificate fingerprint mismatch.
-
-## License
-MIT (add a LICENSE file if you want to publish the repository).
+## Notes
+- The first registered user is automatically assigned `admin` role.
+- Revocation requires login and is enforced server-side in multi-user mode.
+- Local demo/test artifacts are stored under `data/`.
+- If port `8765` is blocked, run the server on another port:
+```powershell
+$env:PKI_SERVER_PORT="9000"
+python server.py
+```

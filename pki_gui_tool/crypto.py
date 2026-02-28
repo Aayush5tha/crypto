@@ -3,9 +3,9 @@
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -45,7 +45,7 @@ def build_name(common_name: str, org: str = "", country: str = "") -> x509.Name:
 
 def create_self_signed_cert(private_key, subject_cn: str, days_valid: int = 365):
     subject = build_name(subject_cn)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -69,7 +69,7 @@ def create_csr(private_key, subject_cn: str, org: str = "", country: str = ""):
 
 
 def sign_csr(ca_private_key, ca_cert: x509.Certificate, csr: x509.CertificateSigningRequest, days_valid: int = 365):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(csr.subject)
@@ -125,7 +125,7 @@ def verify_bytes(public_key, data: bytes, signature: bytes) -> bool:
         return False
 
 
-def sign_file(path: Path, private_key, signer_cert: Optional[x509.Certificate], store: DataStore) -> Dict[str, str]:
+def sign_file(path: Path, private_key, signer_cert: Optional[x509.Certificate]) -> Dict[str, str]:
     payload = path.read_bytes()
     nonce = sha256_hex(os.urandom(32))
     timestamp = str(int(time.time()))
@@ -150,7 +150,7 @@ def verify_file(
     path: Path,
     signature_blob: Dict[str, str],
     public_key,
-    store: DataStore,
+    store: Optional[DataStore] = None,
     enforce_replay: bool = False,
 ) -> SignatureResult:
     meta = signature_blob.get("meta", {})
@@ -163,6 +163,8 @@ def verify_file(
     data_to_verify = json.dumps(meta, sort_keys=True).encode("utf-8")
     nonce = meta.get("nonce", "")
     if enforce_replay:
+        if store is None:
+            return SignatureResult(False, "Replay enforcement requires a nonce store")
         if not nonce:
             return SignatureResult(False, "Missing nonce")
         if store.has_nonce(nonce):
